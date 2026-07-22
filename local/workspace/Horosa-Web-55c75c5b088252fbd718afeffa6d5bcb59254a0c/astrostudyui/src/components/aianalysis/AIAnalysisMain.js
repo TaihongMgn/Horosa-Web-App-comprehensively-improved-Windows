@@ -2391,9 +2391,9 @@ function AIAnalysisMain(props){
 		}
 	}
 
-	// ─── 导出完整 LLM 输入 ───────────────────────────────────────────────────────
-	// 把「即将发送给大模型的全部内容」原样导出为 .txt 文件，方便调试 / 存档 / 复现。
-	// 包含：元信息（模型/参数）、system prompt（含所有挂载层）、对话历史、当前用户消息。
+	// ─── 导出完整 LLM 输入（无裁剪）─────────────────────────────────────────────────
+	// 导出所有挂载内容的【完整原文】，不走预算裁剪（clipContextLayersDetailed），
+	// 方便查看技法/资料被裁剪前的全貌。
 	async function exportFullLLMInput(){
 		const { profileId, model } = parseModelSelection(modelSelection);
 		const profile = providerProfiles.find((item)=>item.id === profileId);
@@ -2403,11 +2403,35 @@ function AIAnalysisMain(props){
 		}
 		try{
 			const trimmed = `${prompt || ''}`.trim() || '（未输入问题——仅导出上下文）';
-			const promptResult = await buildResolvedPrompt(trimmed, profile, null);
 
-			// 与 handleSend 完全一致的 chatMessages 构建逻辑
+			// ─── 复用 buildResolvedPrompt 的层组装逻辑，但跳过裁剪 ───
+			const resolvedRefs = resolveReferenceItems(referenceIds, materials, bundles, templates);
+			const currentSource = activeSource || (activeConversation && activeConversation.sourceRef ? sources.find((item)=>item.id === activeConversation.sourceRef.id) : null);
+			const ctx = currentSource && currentSource.record ? await getAnalysisSourceContext(currentSource, {
+				mode: activeTechniqueKeys.length ? 'meta' : 'full',
+			}) : sourceContext;
+			const resolvedTechniqueContexts = currentSource && activeTechniqueKeys.length
+				? await getAnalysisTechniqueContexts(currentSource, activeTechniqueKeys, {
+					sourceContext: ctx,
+					techniqueOptions: effectiveTechniqueOptions,
+				})
+				: [];
+			const retrieval = await retrieveMaterialContext(trimmed, resolvedRefs, resolveEmbeddingTarget(profile));
+			const layers = buildContextLayers({
+				sourceContext: ctx,
+				techniqueContexts: resolvedTechniqueContexts,
+				materials: retrieval.directMaterials.map((item)=>({ ...item, retrievedOnly: false })),
+				bundles: resolvedRefs.bundles,
+				templates: resolvedRefs.templates,
+				retrievedChunks: retrieval.retrievedChunks,
+				conversationMessages: visibleMessages,
+				systemPrompt: [sessionSystemPrompt, resolvedRefs.systemPrompt].filter(Boolean).join('\n\n'),
+			});
+			// ★ 不做 clipContextLayersDetailed —— 直接拼接所有层（完整无裁剪）
+			const fullSystemPrompt = layers.map((item)=>`${item.title}\n${item.content}`).join('\n\n').trim();
+
 			const chatMessages = [
-				{ role: 'system', content: promptResult.systemPrompt },
+				{ role: 'system', content: fullSystemPrompt },
 			].concat(visibleMessages.map((item)=>({
 				role: item.role,
 				content: item.content,
@@ -2427,7 +2451,7 @@ function AIAnalysisMain(props){
 			const sub = '─'.repeat(72);
 			const lines = [];
 			lines.push(sep);
-			lines.push('Horosa AI 分析 —— 完整 LLM 输入导出');
+			lines.push('Horosa AI 分析 —— 完整 LLM 输入导出（无裁剪）');
 			lines.push(`导出时间: ${moment().format('YYYY-MM-DD HH:mm:ss')}`);
 			lines.push(sep);
 			lines.push('');
@@ -2439,7 +2463,7 @@ function AIAnalysisMain(props){
 			lines.push(`  providerOptions: ${JSON.stringify(chatProviderOptions, null, 2)}`);
 			lines.push('');
 			lines.push(sep);
-			lines.push('【Messages 数组】（即发送给 LLM API 的 messages 字段）');
+			lines.push('【Messages 数组】（完整无裁剪，实际发送时会按模型预算裁剪）');
 			lines.push(sep);
 
 			chatMessages.forEach((msg, idx)=>{
@@ -2453,10 +2477,10 @@ function AIAnalysisMain(props){
 
 			lines.push('');
 			lines.push(sep);
-			lines.push('【上下文层明细】（buildContextLayers 裁剪后保留的层）');
+			lines.push('【上下文层明细】（全部层，未裁剪）');
 			lines.push(sep);
-			if(promptResult.clippedLayers && promptResult.clippedLayers.length){
-				promptResult.clippedLayers.forEach((layer, idx)=>{
+			if(layers.length){
+				layers.forEach((layer, idx)=>{
 					lines.push('');
 					lines.push(`  [${idx}] key: ${layer.key}  |  title: ${layer.title}  |  字数: ${(layer.content || '').length}`);
 				});
@@ -2469,9 +2493,9 @@ function AIAnalysisMain(props){
 
 			const text = lines.join('\n');
 			const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-			const fileName = `horosa_llm_input_${moment().format('YYYYMMDD_HHmmss')}.txt`;
+			const fileName = `horosa_llm_input_full_${moment().format('YYYYMMDD_HHmmss')}.txt`;
 			saveBlobToBrowser(fileName, blob);
-			message.success('已导出完整 LLM 输入');
+			message.success('已导出完整 LLM 输入（无裁剪）');
 		}catch(e){
 			console.error('[exportFullLLMInput]', e);
 			message.error('导出失败: ' + ((e && e.message) || '未知错误'));
