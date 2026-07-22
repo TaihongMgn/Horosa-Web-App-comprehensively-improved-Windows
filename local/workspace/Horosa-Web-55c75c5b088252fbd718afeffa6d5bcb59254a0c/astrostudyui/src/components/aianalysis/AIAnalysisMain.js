@@ -2391,6 +2391,93 @@ function AIAnalysisMain(props){
 		}
 	}
 
+	// ─── 导出完整 LLM 输入 ───────────────────────────────────────────────────────
+	// 把「即将发送给大模型的全部内容」原样导出为 .txt 文件，方便调试 / 存档 / 复现。
+	// 包含：元信息（模型/参数）、system prompt（含所有挂载层）、对话历史、当前用户消息。
+	async function exportFullLLMInput(){
+		const { profileId, model } = parseModelSelection(modelSelection);
+		const profile = providerProfiles.find((item)=>item.id === profileId);
+		if(!profile || !model){
+			message.warning('请先选择可用模型');
+			return;
+		}
+		try{
+			const trimmed = `${prompt || ''}`.trim() || '（未输入问题——仅导出上下文）';
+			const promptResult = await buildResolvedPrompt(trimmed, profile, null);
+
+			// 与 handleSend 完全一致的 chatMessages 构建逻辑
+			const chatMessages = [
+				{ role: 'system', content: promptResult.systemPrompt },
+			].concat(visibleMessages.map((item)=>({
+				role: item.role,
+				content: item.content,
+				images: Array.isArray(item.images) && item.images.length ? item.images : undefined,
+			}))).concat([{
+				role: 'user',
+				content: trimmed,
+			}]);
+
+			// 还原实际发送时的 providerOptions
+			const chatProviderOptions = applyThinkingLevel({ ...(profile.providerOptions || {}) }, thinkingLevel, profile.providerType, model);
+			if(!isReasoningModel(model) && chatTemperature != null){ chatProviderOptions.temperature = chatTemperature; }
+			if(chatTopP != null){ chatProviderOptions.top_p = chatTopP; }
+
+			// ─── 格式化为可读文本 ───
+			const sep = '═'.repeat(72);
+			const sub = '─'.repeat(72);
+			const lines = [];
+			lines.push(sep);
+			lines.push('Horosa AI 分析 —— 完整 LLM 输入导出');
+			lines.push(`导出时间: ${moment().format('YYYY-MM-DD HH:mm:ss')}`);
+			lines.push(sep);
+			lines.push('');
+			lines.push('【元信息】');
+			lines.push(`  Provider 类型 : ${profile.providerType || '-'}`);
+			lines.push(`  Base URL      : ${profile.baseUrl || '(默认)'}`);
+			lines.push(`  模型          : ${model}`);
+			lines.push(`  思考档位      : ${thinkingLevel || '未设置'}`);
+			lines.push(`  providerOptions: ${JSON.stringify(chatProviderOptions, null, 2)}`);
+			lines.push('');
+			lines.push(sep);
+			lines.push('【Messages 数组】（即发送给 LLM API 的 messages 字段）');
+			lines.push(sep);
+
+			chatMessages.forEach((msg, idx)=>{
+				lines.push('');
+				lines.push(sub);
+				const imgNote = msg.images && msg.images.length ? `  [附带 ${msg.images.length} 张图片]` : '';
+				lines.push(`▶ messages[${idx}]  role: ${msg.role}${imgNote}`);
+				lines.push(sub);
+				lines.push(msg.content || '(空)');
+			});
+
+			lines.push('');
+			lines.push(sep);
+			lines.push('【上下文层明细】（buildContextLayers 裁剪后保留的层）');
+			lines.push(sep);
+			if(promptResult.clippedLayers && promptResult.clippedLayers.length){
+				promptResult.clippedLayers.forEach((layer, idx)=>{
+					lines.push('');
+					lines.push(`  [${idx}] key: ${layer.key}  |  title: ${layer.title}  |  字数: ${(layer.content || '').length}`);
+				});
+			}else{
+				lines.push('  (无)');
+			}
+			lines.push('');
+			lines.push(sep);
+			lines.push('— 导出结束 —');
+
+			const text = lines.join('\n');
+			const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+			const fileName = `horosa_llm_input_${moment().format('YYYYMMDD_HHmmss')}.txt`;
+			saveBlobToBrowser(fileName, blob);
+			message.success('已导出完整 LLM 输入');
+		}catch(e){
+			console.error('[exportFullLLMInput]', e);
+			message.error('导出失败: ' + ((e && e.message) || '未知错误'));
+		}
+	}
+
 	async function resetConversationDraft(){
 		await startNewConversation();
 	}
@@ -4315,6 +4402,7 @@ function AIAnalysisMain(props){
 						<Tooltip title="刷新案例"><Button size="small" type="text" icon={<XQIcon name="refresh" />} onClick={()=>setSources(listAnalysisSources())} /></Tooltip>
 						<Tooltip title="添加图片（多媒体输入，仅视觉模型有效）"><Button size="small" type="text" icon={<XQIcon name="import" />} onClick={()=>{ if(imageInputRef.current){ imageInputRef.current.click(); } }} disabled={sending} /></Tooltip>
 						<input ref={imageInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={(e)=>{ handlePickImages(e.target.files); e.target.value = ''; }} />
+						<Tooltip title="导出完整 LLM 输入（系统提示+挂载上下文+对话+参数）"><Button size="small" type="text" icon={<XQIcon name="export" />} onClick={exportFullLLMInput} disabled={sending} /></Tooltip>
 						{sending ? <Tooltip title="停止生成"><Button size="small" type="text" danger icon={<XQIcon name="stop" />} onClick={handleStopStreaming} /></Tooltip> : null}
 					</Space>
 					<div className={styles.composerSend}>
