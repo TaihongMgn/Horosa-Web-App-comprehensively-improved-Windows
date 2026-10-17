@@ -2584,6 +2584,149 @@ function AIAnalysisMain(props){
 		return buildResolvedPromptImpl(currentPrompt, profile, extraSystemContext, true);
 	}
 
+	// ─── 导出完整 LLM 输入（无裁剪）─────────────────────────────────────────────────
+	// 导出所有挂载内容的【完整原文】，不走预算裁剪（clipContextLayersDetailed），
+	// 方便查看技法/资料被裁剪前的全貌。层组装与 buildResolvedPromptImpl 同源
+	// （模板渲染 / 技法选段 / 检索 / 窗口历史策略 / 缓存断点拼接全部一致），
+	// 差异只有两点：layers 不裁剪全量保留；不写任何页面态（挂载快照/裁剪账/指纹）。
+	async function exportFullLLMInput(){
+		const { profileId, model } = parseModelSelection(modelSelection);
+		const profile = providerProfiles.find((item)=>item.id === profileId);
+		if(!profile || !model){
+			message.warning('请先选择可用模型');
+			return;
+		}
+		try{
+			const trimmed = `${prompt || ''}`.trim() || '（未输入问题——仅导出上下文）';
+
+			const _policy = readContextPolicy();
+			const resolvedRefs = resolveReferenceItems(referenceIds, materials, bundles, templates);
+			const currentSource = activeSource || (activeConversation && activeConversation.sourceRef ? sources.find((item)=>item.id === activeConversation.sourceRef.id) : null);
+			const ctx = currentSource && currentSource.record ? await getAnalysisSourceContext(currentSource, {
+				mode: activeTechniqueKeys.length ? 'meta' : 'full',
+			}) : sourceContext;
+			const resolvedTechniqueContexts = chatAssist.filterTechniqueSections(currentSource && activeTechniqueKeys.length
+				? await getAnalysisTechniqueContexts(currentSource, activeTechniqueKeys, {
+					sourceContext: ctx,
+					techniqueOptions: effectiveTechniqueOptions,
+				})
+				: []);
+			const bundleRetrievalMode = (resolvedRefs.bundles || [])
+				.map((b)=>b && b.defaultRetrievalMode)
+				.find((m)=>m === 'fulltext' || m === 'rag');
+			const bundleEmbeddingModel = (resolvedRefs.bundles || [])
+				.map((b)=>`${(b && b.defaultEmbeddingModel) || ''}`.trim())
+				.find(Boolean);
+			const retrieval = await retrieveMaterialContext(trimmed, resolvedRefs, resolveEmbeddingTarget(profile, bundleEmbeddingModel), bundleRetrievalMode);
+			const renderedTemplates = renderTemplatesForSend(resolvedRefs.templates, {
+				user_prompt: `${trimmed || ''}`,
+				source_context: `${(ctx && ctx.content) || ''}`,
+				retrieved_context: (()=>{ try{ return buildRetrievedContextText(retrieval.retrievedChunks || []); }catch(e){ return ''; } })(),
+				conversation_history: chatAssist.mainline(visibleMessages).slice(-8).map((m)=>`[${m.role}] ${`${historyContentOf(m) || ''}`.slice(0, 600)}`).join('\n'),
+				system_prompt: `${sessionSystemPrompt || ''}`,
+			});
+			const layers = buildContextLayers({
+				sourceContext: ctx,
+				techniqueContexts: resolvedTechniqueContexts,
+				materials: retrieval.directMaterials.map((item)=>({ ...item, retrievedOnly: false })),
+				bundles: resolvedRefs.bundles,
+				templates: renderedTemplates,
+				retrievedChunks: retrieval.retrievedChunks,
+				conversationMessages: _policy.historyMode === 'window' ? [] : chatAssist.mainline(visibleMessages),
+				systemPrompt: sessionSystemPrompt,
+				turnExtraContext: undefined,
+				extraLayers: chatAssist.promptLayerExtras(),
+			});
+			// ★ 不做 clipContextLayersDetailed —— 所有层全量保留（完整无裁剪）
+			// 拼接顺序沿用实发路径：稳定层在前、挥发层在后，缓存家族两段之间插 PROMPT_CACHE_BP。
+			const _joinLayers = (arr)=>arr.map((item)=>`${item.title}\n${item.content}`).join('\n\n').trim();
+			const _fam = getProviderProtocolFamily(profile && profile.providerType);
+			const _cacheFam = _fam === 'anthropic' || _fam === 'openai-compatible';
+			const _stableL = layers.filter((item)=>!VOLATILE_LAYER_KEYS[item.key]);
+			const _volatileL = layers.filter((item)=>VOLATILE_LAYER_KEYS[item.key]);
+			let _sysJoined;
+			if(_cacheFam && _stableL.length && _volatileL.length){
+				_sysJoined = [_joinLayers(_stableL), _joinLayers(_volatileL)].filter(Boolean).join(`\n\n${PROMPT_CACHE_BP}\n\n`);
+			}else if(_cacheFam && _stableL.length && _policy.historyMode === 'window'){
+				_sysJoined = `${_joinLayers(_stableL)}\n\n${PROMPT_CACHE_BP}`;
+			}else{
+				_sysJoined = _joinLayers(_stableL.concat(_volatileL));
+			}
+			// [Q-039] JSON 输出模式:实发路径会在系统提示末尾追加只输出 JSON 指令，导出同样带上。
+			if(jsonMode){ _sysJoined = `${_sysJoined}\n\n${JSON_MODE_INSTRUCTION}`; }
+
+			const chatMessages = [
+				{ role: 'system', content: _sysJoined },
+			].concat(chatAssist.mainline(visibleMessages).map((item)=>({
+				role: item.role,
+				content: historyContentOf(item),
+				images: Array.isArray(item.images) && item.images.length ? item.images : undefined,
+			}))).concat([{
+				role: 'user',
+				content: trimmed,
+			}]);
+
+			// 还原实际发送时的 providerOptions（与 streamReply 内部同一套规则）
+			const chatProviderOptions = applyThinkingLevel({ ...(profile.providerOptions || {}) }, thinkingLevel, profile.providerType, model);
+			if(!isReasoningModel(model) && chatTemperature != null){ chatProviderOptions.temperature = chatTemperature; }
+			if(chatTopP != null){ chatProviderOptions.top_p = chatTopP; }
+
+			// ─── 格式化为可读文本 ───
+			const sep = '═'.repeat(72);
+			const sub = '─'.repeat(72);
+			const lines = [];
+			lines.push(sep);
+			lines.push('Horosa AI 分析 —— 完整 LLM 输入导出（无裁剪）');
+			lines.push(`导出时间: ${moment().format('YYYY-MM-DD HH:mm:ss')}`);
+			lines.push(sep);
+			lines.push('');
+			lines.push('【元信息】');
+			lines.push(`  Provider 类型 : ${profile.providerType || '-'}`);
+			lines.push(`  Base URL      : ${profile.baseUrl || '(默认)'}`);
+			lines.push(`  模型          : ${model}`);
+			lines.push(`  思考档位      : ${thinkingLevel || '未设置'}`);
+			lines.push(`  providerOptions: ${JSON.stringify(chatProviderOptions, null, 2)}`);
+			lines.push('');
+			lines.push(sep);
+			lines.push('【Messages 数组】（完整无裁剪；实发时会按模型窗口预算裁剪挂载层）');
+			lines.push(sep);
+
+			chatMessages.forEach((msg, idx)=>{
+				lines.push('');
+				lines.push(sub);
+				const imgNote = msg.images && msg.images.length ? `  [附带 ${msg.images.length} 张图片]` : '';
+				lines.push(`▶ messages[${idx}]  role: ${msg.role}${imgNote}`);
+				lines.push(sub);
+				lines.push(msg.content || '(空)');
+			});
+
+			lines.push('');
+			lines.push(sep);
+			lines.push('【上下文层明细】（全部层，未裁剪）');
+			lines.push(sep);
+			if(layers.length){
+				layers.forEach((layer, idx)=>{
+					lines.push('');
+					lines.push(`  [${idx}] key: ${layer.key}  |  title: ${layer.title}  |  字数: ${(layer.content || '').length}`);
+				});
+			}else{
+				lines.push('  (无)');
+			}
+			lines.push('');
+			lines.push(sep);
+			lines.push('— 导出结束 —');
+
+			const text = lines.join('\n');
+			const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+			const fileName = `horosa_llm_input_full_${moment().format('YYYYMMDD_HHmmss')}.txt`;
+			await saveBlobToBrowser(fileName, blob);
+			message.success('已导出完整 LLM 输入（无裁剪）');
+		}catch(e){
+			console.error('[exportFullLLMInput]', e);
+			message.error('导出失败: ' + ((e && e.message) || '未知错误'));
+		}
+	}
+
 	// 2F：选择图片（多媒体输入）→ 读为 dataURL 暂存，随下一条消息发送。
 	function handlePickImages(fileList){
 		const files = Array.from(fileList || []).filter((f)=>f && /^image\//.test(f.type || ''));
@@ -5003,6 +5146,7 @@ function AIAnalysisMain(props){
 						<Tooltip title="刷新案例"><Button size="small" type="text" icon={<XQIcon name="refresh" />} onClick={()=>setSources(listAnalysisSources({ force: true }))} /></Tooltip>
 						<Tooltip title="添加图片（多媒体输入，仅视觉模型有效）"><Button size="small" type="text" icon={<XQIcon name="import" />} onClick={()=>{ if(imageInputRef.current){ imageInputRef.current.click(); } }} disabled={sending} /></Tooltip>
 						<input ref={imageInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={(e)=>{ handlePickImages(e.target.files); e.target.value = ''; }} />
+						<Tooltip title="导出完整 LLM 输入（系统提示+挂载上下文+对话+参数，无裁剪）"><Button size="small" type="text" icon={<XQIcon name="export" />} onClick={exportFullLLMInput} disabled={sending} /></Tooltip>
 						{sending ? <Tooltip title="停止生成"><Button size="small" type="text" danger icon={<XQIcon name="stop" />} onClick={handleStopStreaming} /></Tooltip> : null}
 					</Space>
 					<div className={styles.composerSend}>
