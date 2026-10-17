@@ -195,3 +195,24 @@ Windows S 模式只允许运行微软商店应用，会阻止安装任何旁加�
 星阙的源流不能忘。最早的星阙 Horosa 由**郑大哥**一手创建，**荀爽（Herakleios，爽哥）**参与辅助设计，并把相关 App 与 Web 公开出来，后来者才有得研究、学习与延展。这个 Windows 版本的继续整理与发布，正是建立在他们已经搭起的星阙体系、术数工作流与公开分享精神之上——补的是 Windows 交付、运行时打包、功能整合与体验改良。没有他们，就没有今天这一版。也感谢每一位持续测试、反馈、修复，推动星阙变得更完整的人。
 
 特别感谢 [kentang2017](https://github.com/kentang2017) 长期公开的传统术数 Python 项目。星阙接入或适配了其中多项计算引擎——已声明为 MIT 的上游项目在对应 vendored 目录与 `THIRD_PARTY_NOTICES.md` 中保留许可证说明；未找到明确开源声明的项目则单独标注，避免在没有声明的地方擅自假定许可证。
+
+## 本 fork 增强：导出完整 LLM 输入
+
+入口页有简述（见 [README.md](README.md)），此处为完整说明。
+
+**功能**：AI 分析页对话输入框工具栏新增导出按钮（图片按钮旁）。点击后生成 `horosa_llm_input_full_*.txt`，包含：
+
+- 【元信息】Provider 类型、Base URL、模型、思考档位、实际生效的 `providerOptions`（思考注入 / 温度 / top_p 按实发同款规则回填）；
+- 【Messages 数组】逐条列出 role 与完整内容（系统层为全层拼接结果；图片标注数量）；
+- 【上下文层明细】每层的 key / 标题 / 字数清单。
+
+**组装路径与实发完全同源**：与 `buildResolvedPromptImpl` 调用同一批上下文构建函数——命盘上下文、技法上下文（经过技法选段过滤）、资料检索（组合的默认检索策略与默认 Embedding 模型同源读取）、模板变量按本轮真实值渲染、历史按上下文策略（窗口模式不进系统层）、稳定/挥发层划分与前缀缓存断点、JSON 输出模式指令追加。**唯一差异是不执行 `clipContextLayersDetailed` 的挂载预算裁剪**——所有层全量保留、完整原文导出。因此导出文件就是「假设窗口预算无限时本轮实际会发给模型的内容」。
+
+**适用场景**：核对某份挂载资料是否发给了模型、是否被裁剪、裁剪前的原文；给外部模型复现问题；审计系统提示词的实际效果。
+
+**分支**：
+
+- [`feat/export-llm-input`](https://github.com/TaihongMgn/Horosa-Web-App-comprehensively-improved-Windows/tree/feat/export-llm-input)——基于 v3.5.1 代码的原始实现，附[构建与部署指南](https://github.com/TaihongMgn/Horosa-Web-App-comprehensively-improved-Windows/blob/feat/export-llm-input/EXPORT_LLM_INPUT_GUIDE.md)。
+- `horosa-v3113-export-llm-input`——移植到上游 v3.11.3 的适配版（跟进组装链演进与 async 保存适配），为官方 3.11.3 安装版本地补丁所用源码。
+
+**已安装版补丁方式**：官方安装版前端产物 `dist-file` 位于运行副本中，启动时按 `payload-manifest.json` 做完整性预检（失配触发差量还原）。补丁做法是重建前端产物后叠加进运行副本、旧文件全部保留（预检所列文件完好 → 永远走缓存路径不还原），由补丁版 `index.html` 接管引用链加载带功能的新分块。触发「自检修复」或升级到上游新版本后需要重打。
