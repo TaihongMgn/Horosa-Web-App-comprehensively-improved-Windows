@@ -33,6 +33,7 @@
 5. [许可与第三方](#五许可与第三方)
 6. [致谢](#六致谢)
 7. [文档与入口](#七文档与入口)
+8. [本 fork 增强：导出完整 LLM 输入](#本-fork-增强导出完整-llm-输入)
 
 ---
 
@@ -276,3 +277,22 @@
 - 法律与隐私：[docs/legal](docs/legal/)（服务条款 · 隐私政策 · 安全 · 网络 · 开源声明）
 - 语言详版：[README_ZH.md](README_ZH.md) · [README_EN.md](README_EN.md)
 - 安装疑难解答（SmartScreen 提示 / 杀毒软件误报 / 磁盘与路径要求 / 离线使用与手动更新 / ARM 设备支持 / 系统语言无关）：见 [README_ZH.md「常见问题」](README_ZH.md#常见问题) 或 [README_EN.md “FAQ”](README_EN.md#faq)
+
+---
+
+## 本 fork 增强：导出完整 LLM 输入
+
+在「AI 分析」对话输入框的工具栏新增一个导出按钮（添加图片按钮旁），点击即把**发送给 LLM 的完整输入**导出为 txt 文件：系统提示、命盘 / 技法 / 资料 / 组合 / 模板等全部挂载上下文、对话历史、思考档位与实际生效的采样参数。
+
+导出与实发完全同源：走同一条组装路径（模板按本轮真实值渲染、技法按所选段过滤、资料按同款检索、历史按上下文策略处理、前缀缓存断点按实发规则插入），唯一差异是**跳过按模型窗口预算执行的挂载裁剪**。用途：核对某份技法或资料到底有没有发给模型、发的是不是原文、被裁掉了多少——不用再对着模型的回答猜。
+
+### 分支
+
+| 分支 | 说明 |
+| --- | --- |
+| [`feat/export-llm-input`](https://github.com/TaihongMgn/Horosa-Web-App-comprehensively-improved-Windows/tree/feat/export-llm-input) | 基于 v3.5.1 代码的原始实现，附[构建与部署指南](https://github.com/TaihongMgn/Horosa-Web-App-comprehensively-improved-Windows/blob/feat/export-llm-input/EXPORT_LLM_INPUT_GUIDE.md)。 |
+| `horosa-v3113-export-llm-input` | 移植到上游 v3.11.3 的适配版：跟随 `buildResolvedPromptImpl` 的完整组装链（模板渲染 / 技法选段 / 检索 / 窗口历史 / 前缀缓存断点），并适配 `saveBlobToBrowser` 的 async 化与 `notifySaveResult`，即官方 3.11.3 安装版补丁所用源码。 |
+
+### 已安装版如何打补丁
+
+官方安装版的前端产物 `dist-file` 随载荷物化在运行副本中，启动时按清单做完整性预检（失配会自动差量还原）。给已安装的应用加这个功能，走的是「源码移植 → 重建前端 → 叠加运行副本」：检出安装版对应的上游提交，改源码，`npm run build:file` 重建 `dist-file`；把新分块与补丁版 `index.html` 叠加进运行副本，旧文件一字不动（清单所列文件完好，预检永远通过、不会触发还原）；加载链路由补丁 `index.html` 指向新 bundle、新 bundle 的分块映射指向补丁分块。失效与重打：手动点「自检修复」或升级到上游新版本后需要重跑一遍 Deployment 流程。
